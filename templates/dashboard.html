@@ -191,6 +191,67 @@
 
                 <div class="section-card">
                     <div class="section-header">
+                        <h3>Reliability Scorecard</h3>
+                        <button class="section-action" id="refresh-scorecard-btn">
+                            <i class="fas fa-sync-alt"></i>
+                            Refresh
+                        </button>
+                    </div>
+                    <div class="section-content">
+                        <div class="scorecard-grid" id="scorecard-grid">
+                            <div class="scorecard-tile">
+                                <span class="scorecard-value" id="sc-total-checks">0</span>
+                                <span class="scorecard-label">Total Checks</span>
+                            </div>
+                            <div class="scorecard-tile">
+                                <span class="scorecard-value" id="sc-clean-rate">0%</span>
+                                <span class="scorecard-label">Clean Run Rate</span>
+                            </div>
+                            <div class="scorecard-tile">
+                                <span class="scorecard-value" id="sc-last-check">—</span>
+                                <span class="scorecard-label">Last Check</span>
+                            </div>
+                        </div>
+                        <div class="severity-bar-chart" id="severity-bar-chart"></div>
+                    </div>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-header">
+                        <h3>Demo Walkthrough</h3>
+                    </div>
+                    <div class="section-content">
+                        <p class="incident-subtitle">
+                            Runs a scripted scenario through the real detection pipeline - useful for a
+                            live walkthrough without needing live cloud credentials.
+                        </p>
+                        <div class="demo-scenario-grid">
+                            <button class="demo-scenario-btn severity-critical" data-scenario="critical">
+                                <i class="fas fa-shield-alt"></i>
+                                <span>Widen Security Group</span>
+                                <small>CRITICAL</small>
+                            </button>
+                            <button class="demo-scenario-btn severity-high" data-scenario="high">
+                                <i class="fas fa-trash-alt"></i>
+                                <span>Delete Instance</span>
+                                <small>HIGH</small>
+                            </button>
+                            <button class="demo-scenario-btn severity-medium" data-scenario="medium">
+                                <i class="fas fa-server"></i>
+                                <span>Resize Instance</span>
+                                <small>MEDIUM</small>
+                            </button>
+                            <button class="demo-scenario-btn severity-clean" data-scenario="clean">
+                                <i class="fas fa-check-circle"></i>
+                                <span>Run Clean Check</span>
+                                <small>NO DRIFT</small>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-header">
                         <h3>Incident History</h3>
                         <button class="section-action" id="refresh-incidents-btn">
                             <i class="fas fa-sync-alt"></i>

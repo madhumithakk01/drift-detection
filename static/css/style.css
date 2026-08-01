@@ -1609,6 +1609,148 @@ body {
     margin-top: 2px !important;
 }
 
+/* Reliability Scorecard */
+
+.scorecard-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.scorecard-tile {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+
+.scorecard-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.scorecard-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.severity-bar-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.severity-bar-row {
+    display: grid;
+    grid-template-columns: 70px 1fr 28px;
+    align-items: center;
+    gap: 10px;
+}
+
+.severity-bar-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.severity-bar-track {
+    height: 8px;
+    background: var(--bg-secondary, rgba(255, 255, 255, 0.05));
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.severity-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.severity-bar-fill.severity-critical { background: #ef4444; }
+.severity-bar-fill.severity-high { background: #f97316; }
+.severity-bar-fill.severity-medium { background: #f59e0b; }
+.severity-bar-fill.severity-low { background: var(--accent-color); }
+
+.severity-bar-count {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    text-align: right;
+}
+
+/* Demo Walkthrough */
+
+.demo-scenario-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+}
+
+.demo-scenario-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 16px 10px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.demo-scenario-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+}
+
+.demo-scenario-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.demo-scenario-btn i {
+    font-size: 1.3rem;
+}
+
+.demo-scenario-btn span {
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.demo-scenario-btn small {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    padding: 2px 6px;
+    border-radius: 8px;
+}
+
+.demo-scenario-btn.severity-critical { border-color: rgba(239, 68, 68, 0.4); }
+.demo-scenario-btn.severity-critical i, .demo-scenario-btn.severity-critical small { color: #ef4444; }
+
+.demo-scenario-btn.severity-high { border-color: rgba(249, 115, 22, 0.4); }
+.demo-scenario-btn.severity-high i, .demo-scenario-btn.severity-high small { color: #f97316; }
+
+.demo-scenario-btn.severity-medium { border-color: rgba(251, 191, 36, 0.4); }
+.demo-scenario-btn.severity-medium i, .demo-scenario-btn.severity-medium small { color: #f59e0b; }
+
+.demo-scenario-btn.severity-clean { border-color: rgba(16, 185, 129, 0.4); }
+.demo-scenario-btn.severity-clean i, .demo-scenario-btn.severity-clean small { color: #10b981; }
+
+.demo-scenario-btn.loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
     .auth-container {

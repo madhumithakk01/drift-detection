@@ -524,12 +524,22 @@ function initializeDriftDetection() {
     if (refreshIncidentsBtn) {
         refreshIncidentsBtn.addEventListener('click', loadIncidentHistory);
     }
+
+    const refreshScorecardBtn = document.getElementById('refresh-scorecard-btn');
+    if (refreshScorecardBtn) {
+        refreshScorecardBtn.addEventListener('click', loadReliabilityScorecard);
+    }
+
+    document.querySelectorAll('.demo-scenario-btn').forEach(btn => {
+        btn.addEventListener('click', () => runDemoScenario(btn.dataset.scenario, btn));
+    });
     
     // Load initial drift status
     loadDriftStatus();
 
-    // Load initial incident history
+    // Load initial incident history and reliability scorecard
     loadIncidentHistory();
+    loadReliabilityScorecard();
     
     // Refresh drift status every 30 seconds
     setInterval(loadDriftStatus, 30000);
@@ -797,6 +807,93 @@ function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+// =============================================================================
+// DEMO WALKTHROUGH FUNCTIONS
+// =============================================================================
+
+function runDemoScenario(scenario, buttonEl) {
+    if (!scenario) return;
+
+    document.querySelectorAll('.demo-scenario-btn').forEach(btn => btn.disabled = true);
+    if (buttonEl) buttonEl.classList.add('loading');
+
+    fetch('/run-demo-scenario', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scenario })
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showSuccess(data.message || 'Demo scenario completed');
+                loadDriftStatus();
+                loadIncidentHistory();
+                loadReliabilityScorecard();
+            } else {
+                showError(data.message || 'Failed to run demo scenario');
+            }
+        })
+        .catch(error => {
+            console.error('Error running demo scenario:', error);
+            showError('Failed to run demo scenario');
+        })
+        .finally(() => {
+            document.querySelectorAll('.demo-scenario-btn').forEach(btn => btn.disabled = false);
+            if (buttonEl) buttonEl.classList.remove('loading');
+        });
+}
+
+// =============================================================================
+// RELIABILITY SCORECARD FUNCTIONS
+// =============================================================================
+
+function loadReliabilityScorecard() {
+    fetch('/get-reliability-scorecard')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                renderReliabilityScorecard(data.scorecard);
+            }
+        })
+        .catch(error => {
+            console.error('Error loading reliability scorecard:', error);
+        });
+}
+
+function renderReliabilityScorecard(scorecard) {
+    const totalEl = document.getElementById('sc-total-checks');
+    const cleanRateEl = document.getElementById('sc-clean-rate');
+    const lastCheckEl = document.getElementById('sc-last-check');
+    const barChartEl = document.getElementById('severity-bar-chart');
+
+    if (totalEl) totalEl.textContent = scorecard.total_checks;
+    if (cleanRateEl) cleanRateEl.textContent = `${scorecard.clean_run_rate}%`;
+    if (lastCheckEl) {
+        lastCheckEl.textContent = scorecard.last_check
+            ? new Date(scorecard.last_check).toLocaleString()
+            : '—';
+    }
+
+    if (!barChartEl) return;
+
+    const totals = scorecard.severity_totals || {};
+    const maxValue = Math.max(1, ...Object.values(totals));
+    const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+
+    barChartEl.innerHTML = order.map(severity => {
+        const count = totals[severity] || 0;
+        const widthPct = Math.round((count / maxValue) * 100);
+        return `
+            <div class="severity-bar-row">
+                <span class="severity-bar-label severity-${severity.toLowerCase()}">${severity}</span>
+                <div class="severity-bar-track">
+                    <div class="severity-bar-fill severity-${severity.toLowerCase()}" style="width: ${count > 0 ? Math.max(widthPct, 6) : 0}%"></div>
+                </div>
+                <span class="severity-bar-count">${count}</span>
+            </div>`;
+    }).join('');
 }
 
 // =============================================================================
