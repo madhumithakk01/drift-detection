@@ -11,6 +11,7 @@ The application will automatically create the DynamoDB table if it doesn't exist
 """
 
 from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask.json.provider import DefaultJSONProvider
 import boto3
 from botocore.exceptions import ClientError
 import os
@@ -21,6 +22,7 @@ import hashlib
 import re
 import uuid
 import copy
+from decimal import Decimal
 from datetime import datetime
 import threading
 from flask_apscheduler import APScheduler
@@ -31,7 +33,24 @@ from apscheduler.triggers.interval import IntervalTrigger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+class DecimalSafeJSONProvider(DefaultJSONProvider):
+    """
+    DynamoDB always returns numeric attributes as Decimal, which Flask's default
+    JSON encoder can't serialize. This converts Decimal -> int (when whole) or
+    float, applied globally so every route that returns DynamoDB data (baseline
+    summaries, drift status, incidents, the reliability scorecard, etc.) works
+    correctly without each function having to handle it individually.
+    """
+    @staticmethod
+    def default(obj):
+        if isinstance(obj, Decimal):
+            return int(obj) if obj % 1 == 0 else float(obj)
+        return DefaultJSONProvider.default(obj)
+
+
 app = Flask(__name__)
+app.json = DecimalSafeJSONProvider(app)
 app.secret_key = 'configsync-dashboard-secret-key-2024'
 
 # Configure APScheduler
@@ -47,13 +66,22 @@ DEMO_USER_EMAIL = 'madhumithakk1504@gmail.com'
 
 # AWS Configuration
 AWS_REGION = 'eu-north-1'
+
+# Optional override so the app can run against DynamoDB Local (or any other
+# DynamoDB-compatible endpoint) for offline demos/testing. Leave unset to use
+# real AWS DynamoDB as before. Example: DYNAMODB_ENDPOINT_URL=http://localhost:8000
+DYNAMODB_ENDPOINT_URL = os.environ.get('DYNAMODB_ENDPOINT_URL')
 DYNAMODB_TABLE_NAME = 'Users'
 SNAPSHOTS_TABLE_NAME = 'Snapshots'
 INCIDENTS_TABLE_NAME = 'Incidents'
 
 # Initialize DynamoDB client
 try:
-    dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
+    if DYNAMODB_ENDPOINT_URL:
+        dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION, endpoint_url=DYNAMODB_ENDPOINT_URL)
+        logger.info(f"Using custom DynamoDB endpoint: {DYNAMODB_ENDPOINT_URL}")
+    else:
+        dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
     table = dynamodb.Table(DYNAMODB_TABLE_NAME)
     snapshots_table = dynamodb.Table(SNAPSHOTS_TABLE_NAME)
     incidents_table = dynamodb.Table(INCIDENTS_TABLE_NAME)
