@@ -20,6 +20,7 @@ import json
 import hashlib
 import re
 import uuid
+import copy
 from datetime import datetime
 import threading
 from flask_apscheduler import APScheduler
@@ -1278,6 +1279,147 @@ def get_incident_detail(user_email, incident_id):
         return None
 
 
+# =============================================================================
+# DEMO WALKTHROUGH: SCRIPTED DRIFT SCENARIOS FOR RELIABLE, OFFLINE-SAFE DEMOS
+# =============================================================================
+# These functions build synthetic baseline/current resource sets in exactly the
+# same shape that get_baseline_snapshots()/collect_*_current() produce, then run
+# them through the real compare_with_baseline() -> diagnostics -> incident
+# pipeline. Nothing here is faked at the drift-detection layer - only the
+# input resources are scripted, so a demo behaves identically to a real run
+# without depending on live cloud credentials or network access.
+
+DEMO_SCENARIO_LABELS = {
+    'critical': 'Security Group Widened (CRITICAL)',
+    'high': 'Instance Deleted (HIGH)',
+    'medium': 'Instance Resized (MEDIUM)',
+    'clean': 'Clean Run (No Drift)'
+}
+
+
+def _demo_resource(resource_type, resource_id, resource_name, config_dict):
+    """Build a resource entry in the same shape used by the real collectors."""
+    config_json = json.dumps(config_dict, sort_keys=True)
+    config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+    return {
+        'config': config_json,
+        'config_hash': config_hash,
+        'resource_type': resource_type,
+        'resource_id': resource_id,
+        'resource_name': resource_name
+    }
+
+
+def _update_demo_resource_config(entry, new_config_dict):
+    """Mutate a demo resource entry's config in place and recompute its hash."""
+    config_json = json.dumps(new_config_dict, sort_keys=True)
+    entry['config'] = config_json
+    entry['config_hash'] = hashlib.sha256(config_json.encode()).hexdigest()
+
+
+def _get_demo_fleet_baseline():
+    """
+    A small, realistic multi-cloud 'fleet' used as the baseline for every demo
+    scenario. Most resources stay identical between baseline and current so a
+    demo run looks like a real environment check, not a single isolated diff.
+    """
+    return {
+        'aws': {
+            'AWS#EC2#i-demo-101': _demo_resource('EC2', 'i-demo-101', 'checkout-api', {
+                'instance_type': 't3.medium',
+                'state': 'running',
+                'security_groups': ['sg-demo-safe'],
+                'image_id': 'ami-demo-001'
+            }),
+            'AWS#EC2#i-demo-102': _demo_resource('EC2', 'i-demo-102', 'payments-worker', {
+                'instance_type': 't3.small',
+                'state': 'running',
+                'security_groups': ['sg-demo-safe'],
+                'image_id': 'ami-demo-002'
+            })
+        },
+        'gcp': {
+            'GCP#VM#demo-vm-201': _demo_resource('VM', 'demo-vm-201', 'analytics-batch', {
+                'machine_type': 'e2-small',
+                'zone': 'us-central1-a',
+                'status': 'running'
+            })
+        },
+        'azure': {
+            'AZURE#VM#azure-vm-demo-1': _demo_resource('VM', 'azure-vm-demo-1', 'auth-service', {
+                'vm_size': 'Standard_B1s',
+                'location': 'East US',
+                'status': 'running'
+            })
+        }
+    }
+
+
+def get_demo_scenario_data(scenario):
+    """
+    Return (baseline_snapshots, current_resources) for a named demo scenario.
+    Both are deep copies of the same fleet baseline, so only the scripted
+    change for that scenario differs between the two.
+    """
+    if scenario not in DEMO_SCENARIO_LABELS:
+        raise ValueError(f"Unknown demo scenario: {scenario}")
+
+    baseline = copy.deepcopy(_get_demo_fleet_baseline())
+    current = copy.deepcopy(_get_demo_fleet_baseline())
+
+    if scenario == 'critical':
+        entry = current['aws']['AWS#EC2#i-demo-101']
+        cfg = json.loads(entry['config'])
+        cfg['security_groups'] = cfg['security_groups'] + ['sg-demo-open-all']
+        _update_demo_resource_config(entry, cfg)
+
+    elif scenario == 'high':
+        del current['aws']['AWS#EC2#i-demo-102']
+
+    elif scenario == 'medium':
+        entry = current['azure']['AZURE#VM#azure-vm-demo-1']
+        cfg = json.loads(entry['config'])
+        cfg['vm_size'] = 'Standard_D2s_v3'
+        _update_demo_resource_config(entry, cfg)
+
+    # 'clean' scenario intentionally makes no changes.
+
+    return baseline, current
+
+
+# =============================================================================
+# RELIABILITY SCORECARD
+# =============================================================================
+
+def get_reliability_scorecard(user_email, history_limit=50):
+    """
+    Compute a lightweight reliability scorecard purely from stored incident
+    records - no new data pipeline required. Summarizes check volume, how
+    often checks come back clean, and the all-time severity distribution.
+    """
+    incidents = get_incident_history(user_email, limit=history_limit)
+
+    total_checks = len(incidents)
+    clean_runs = sum(1 for incident in incidents if incident.get('total_drifts', 0) == 0)
+    clean_run_rate = round((clean_runs / total_checks) * 100, 1) if total_checks else 0.0
+
+    severity_totals = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+    for incident in incidents:
+        breakdown = incident.get('severity_breakdown', {}) or {}
+        for severity in severity_totals:
+            severity_totals[severity] += breakdown.get(severity, 0)
+
+    last_check = incidents[0].get('timestamp') if incidents else None
+
+    return {
+        'total_checks': total_checks,
+        'clean_runs': clean_runs,
+        'clean_run_rate': clean_run_rate,
+        'severity_totals': severity_totals,
+        'last_check': last_check
+    }
+
+
 def compare_with_baseline(baseline_snapshots, current_resources):
     """Compare current resources with baseline and detect drift"""
     drift_summary = {
@@ -1886,6 +2028,74 @@ def get_incident_detail_api(incident_id):
     except Exception as e:
         logger.error(f"Error getting incident detail: {str(e)}")
         return {'success': False, 'message': f'Error getting incident detail: {str(e)}'}, 500
+
+
+@app.route('/run-demo-scenario', methods=['POST'])
+def run_demo_scenario_api():
+    """
+    Run a scripted demo scenario through the real drift-detection pipeline.
+    Intended for walkthroughs/demos where live cloud credentials aren't
+    available - the resource data is scripted, but detection, diffing,
+    severity classification, root-cause suggestions, and incident storage
+    all execute exactly as they would for a real check.
+    """
+    if 'user_email' not in session:
+        return {'success': False, 'message': 'Please log in'}, 401
+
+    try:
+        data = request.get_json(silent=True) or {}
+        scenario = data.get('scenario', 'critical')
+
+        if scenario not in DEMO_SCENARIO_LABELS:
+            return {
+                'success': False,
+                'message': f"Unknown demo scenario '{scenario}'. Valid options: {', '.join(DEMO_SCENARIO_LABELS.keys())}"
+            }, 400
+
+        user_email = session['user_email']
+        baseline_snapshots, current_resources = get_demo_scenario_data(scenario)
+
+        drift_summary = compare_with_baseline(baseline_snapshots, current_resources)
+        drift_summary['demo_scenario'] = DEMO_SCENARIO_LABELS[scenario]
+
+        incident_record = build_incident_record(user_email, drift_summary)
+        incident_record['demo_scenario'] = DEMO_SCENARIO_LABELS[scenario]
+        save_incident(incident_record)
+
+        update_dashboard(user_email, drift_summary, 'Running')
+
+        logger.info(f"Ran demo scenario '{scenario}' for {user_email}: {drift_summary['total_drifts']} drift(s)")
+
+        return {
+            'success': True,
+            'message': f"Demo scenario completed: {DEMO_SCENARIO_LABELS[scenario]}",
+            'drift_status': drift_summary,
+            'incident': incident_record
+        }
+
+    except Exception as e:
+        logger.error(f"Error running demo scenario: {str(e)}")
+        return {'success': False, 'message': f'Error running demo scenario: {str(e)}'}, 500
+
+
+@app.route('/get-reliability-scorecard')
+def get_reliability_scorecard_api():
+    """Get the reliability scorecard (check volume, clean-run rate, severity totals)"""
+    if 'user_email' not in session:
+        return {'success': False, 'message': 'Please log in'}, 401
+
+    try:
+        user_email = session['user_email']
+        scorecard = get_reliability_scorecard(user_email)
+
+        return {
+            'success': True,
+            'scorecard': scorecard
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting reliability scorecard: {str(e)}")
+        return {'success': False, 'message': f'Error getting reliability scorecard: {str(e)}'}, 500
 
 
 @app.route('/test-s3-versioning-email', methods=['POST'])
