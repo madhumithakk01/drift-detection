@@ -171,6 +171,60 @@ def test_save_and_retrieve_incident():
         app.incidents_table = original_table
 
 
+def test_demo_scenarios():
+    """Test that each scripted demo scenario produces the expected drift profile"""
+    print("Testing demo walkthrough scenarios...")
+
+    expectations = {
+        'critical': (1, 'CRITICAL'),
+        'high': (1, 'HIGH'),
+        'medium': (1, 'MEDIUM'),
+        'clean': (0, None)
+    }
+
+    for scenario, (expected_total, expected_severity) in expectations.items():
+        baseline, current = app.get_demo_scenario_data(scenario)
+        drift_summary = app.compare_with_baseline(baseline, current)
+        total = drift_summary['total_drifts'] + drift_summary.get('total_s3_parity_drifts', 0)
+
+        assert total == expected_total, f"scenario '{scenario}': expected {expected_total} drifts, got {total}"
+
+        if expected_severity:
+            severities = [d['severity'] for d in drift_summary['drifts_detected']]
+            assert expected_severity in severities, f"scenario '{scenario}': expected {expected_severity} severity"
+
+    print("✓ All 4 demo scenarios (critical/high/medium/clean) produce the expected drift profile")
+
+
+def test_reliability_scorecard():
+    """Test reliability scorecard aggregation against a mocked incident history"""
+    print("Testing reliability scorecard...")
+
+    original_table = app.incidents_table
+    app.incidents_table = MagicMock()
+
+    try:
+        app.incidents_table.query.return_value = {'Items': [
+            {'timestamp': 't3', 'total_drifts': 0, 'severity_breakdown': {}},
+            {'timestamp': 't2', 'total_drifts': 1, 'severity_breakdown': {'CRITICAL': 1, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}},
+            {'timestamp': 't1', 'total_drifts': 2, 'severity_breakdown': {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 1, 'LOW': 0}},
+        ]}
+
+        scorecard = app.get_reliability_scorecard('test@configsync.com')
+
+        assert scorecard['total_checks'] == 3
+        assert scorecard['clean_runs'] == 1
+        assert scorecard['clean_run_rate'] == 33.3
+        assert scorecard['severity_totals']['CRITICAL'] == 1
+        assert scorecard['severity_totals']['HIGH'] == 1
+        assert scorecard['severity_totals']['MEDIUM'] == 1
+        assert scorecard['last_check'] == 't3'
+
+        print(f"✓ Reliability scorecard aggregates correctly: {scorecard}")
+    finally:
+        app.incidents_table = original_table
+
+
 def run_all_tests():
     print("Testing ConfigSync Dashboard Incident Diagnostics...")
     print("=" * 60)
@@ -181,6 +235,8 @@ def run_all_tests():
     test_enrich_drift_with_diagnostics()
     test_build_incident_record()
     test_save_and_retrieve_incident()
+    test_demo_scenarios()
+    test_reliability_scorecard()
 
     print("=" * 60)
     print("✓ All incident diagnostics tests passed")
