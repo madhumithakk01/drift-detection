@@ -519,9 +519,17 @@ function initializeDriftDetection() {
     if (testS3EmailBtn) {
         testS3EmailBtn.addEventListener('click', testS3VersioningEmail);
     }
+
+    const refreshIncidentsBtn = document.getElementById('refresh-incidents-btn');
+    if (refreshIncidentsBtn) {
+        refreshIncidentsBtn.addEventListener('click', loadIncidentHistory);
+    }
     
     // Load initial drift status
     loadDriftStatus();
+
+    // Load initial incident history
+    loadIncidentHistory();
     
     // Refresh drift status every 30 seconds
     setInterval(loadDriftStatus, 30000);
@@ -611,8 +619,9 @@ function runDriftCheck() {
         
         if (data.success) {
             showSuccess(data.message || 'Drift check initiated successfully!');
-            // Refresh drift status after a short delay
+            // Refresh drift status and incident history after a short delay
             setTimeout(loadDriftStatus, 2000);
+            setTimeout(loadIncidentHistory, 2500);
         } else {
             showError(data.message || 'Failed to run drift check');
         }
@@ -692,25 +701,215 @@ function updateDriftResults(driftStatus) {
 
 function createDriftItem(drift, index) {
     const driftItem = document.createElement('div');
-    driftItem.className = 'drift-item';
+    driftItem.className = 'drift-item drift-item-expandable';
     
     const iconClass = getDriftIconClass(drift.type);
     const iconSymbol = getDriftIconSymbol(drift.type);
-    
-    driftItem.innerHTML = `
+    const severity = drift.severity || 'MEDIUM';
+    const severityClass = `severity-${severity.toLowerCase()}`;
+    const resourceLine = drift.type === 's3_parity'
+        ? `Bucket: ${drift.bucket_name} (${(drift.clouds_affected || []).join(', ')})`
+        : `${drift.cloud} - ${drift.resource_type}: ${drift.resource_name}`;
+
+    const header = document.createElement('div');
+    header.className = 'drift-item-header';
+    header.innerHTML = `
         <div class="drift-icon ${iconClass}">
             <i class="fas ${iconSymbol}"></i>
         </div>
         <div class="drift-content-info">
-            <h5>${drift.change_type}</h5>
-            <p>${drift.cloud} - ${drift.resource_type}: ${drift.resource_name}</p>
+            <h5>
+                ${drift.change_type}
+                <span class="severity-badge ${severityClass}">${severity}</span>
+            </h5>
+            <p>${resourceLine}</p>
         </div>
         <div class="drift-timestamp">
             ${new Date(drift.timestamp).toLocaleString()}
+            <i class="fas fa-chevron-down drift-expand-icon"></i>
         </div>
     `;
-    
+
+    const body = document.createElement('div');
+    body.className = 'drift-item-body';
+    body.style.display = 'none';
+    body.innerHTML = buildDriftDiagnosticsHtml(drift);
+
+    header.addEventListener('click', () => {
+        const isOpen = body.style.display !== 'none';
+        body.style.display = isOpen ? 'none' : 'block';
+        header.classList.toggle('expanded', !isOpen);
+    });
+
+    driftItem.appendChild(header);
+    driftItem.appendChild(body);
+
     return driftItem;
+}
+
+function buildDriftDiagnosticsHtml(drift) {
+    let html = '';
+
+    if (drift.likely_cause) {
+        html += `
+            <div class="drift-diagnostic-row">
+                <span class="diagnostic-label">Likely Cause</span>
+                <p>${escapeHtml(drift.likely_cause)}</p>
+            </div>`;
+    }
+
+    if (drift.recommended_action) {
+        html += `
+            <div class="drift-diagnostic-row">
+                <span class="diagnostic-label">Recommended Action</span>
+                <p>${escapeHtml(drift.recommended_action)}</p>
+            </div>`;
+    }
+
+    if (Array.isArray(drift.field_diff) && drift.field_diff.length > 0) {
+        html += `<div class="diagnostic-label">Field-Level Diff</div><table class="field-diff-table"><tbody>`;
+        drift.field_diff.forEach(entry => {
+            html += `
+                <tr>
+                    <td class="field-name">${escapeHtml(entry.field)}</td>
+                    <td class="field-old">${escapeHtml(formatDiffValue(entry.old_value))}</td>
+                    <td class="field-arrow"><i class="fas fa-arrow-right"></i></td>
+                    <td class="field-new">${escapeHtml(formatDiffValue(entry.new_value))}</td>
+                </tr>`;
+        });
+        html += `</tbody></table>`;
+    }
+
+    if (!html) {
+        html = '<p class="incident-empty">No additional diagnostic detail available for this drift.</p>';
+    }
+
+    return html;
+}
+
+function formatDiffValue(value) {
+    if (value === null || value === undefined) return '—';
+    if (Array.isArray(value)) return value.join(', ') || '—';
+    return String(value);
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+// =============================================================================
+// INCIDENT HISTORY FUNCTIONS
+// =============================================================================
+
+function loadIncidentHistory() {
+    fetch('/get-incident-history')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                renderIncidentHistory(data.incidents || []);
+            }
+        })
+        .catch(error => {
+            console.error('Error loading incident history:', error);
+        });
+}
+
+function renderIncidentHistory(incidents) {
+    const incidentList = document.getElementById('incident-list');
+    if (!incidentList) return;
+
+    if (!incidents.length) {
+        incidentList.innerHTML = '<p class="incident-empty">No incidents recorded yet. Run a drift check to get started.</p>';
+        return;
+    }
+
+    incidentList.innerHTML = '';
+
+    incidents.forEach(incident => {
+        const item = document.createElement('div');
+        item.className = 'incident-item';
+
+        const worstSeverity = getWorstSeverity(incident.severity_breakdown);
+        const severityClass = `severity-${worstSeverity.toLowerCase()}`;
+
+        item.innerHTML = `
+            <div class="incident-item-header">
+                <span class="severity-badge ${severityClass}">${incident.total_drifts > 0 ? worstSeverity : 'CLEAN'}</span>
+                <div class="incident-summary-text">
+                    <p class="incident-executive-summary">${escapeHtml(incident.executive_summary || '')}</p>
+                    <span class="incident-timestamp">${new Date(incident.timestamp).toLocaleString()}</span>
+                </div>
+                <i class="fas fa-chevron-down drift-expand-icon"></i>
+            </div>
+            <div class="incident-item-body" style="display: none;"></div>
+        `;
+
+        const header = item.querySelector('.incident-item-header');
+        const body = item.querySelector('.incident-item-body');
+
+        header.addEventListener('click', () => {
+            const isOpen = body.style.display !== 'none';
+            if (isOpen) {
+                body.style.display = 'none';
+                header.classList.remove('expanded');
+                return;
+            }
+
+            header.classList.add('expanded');
+            body.style.display = 'block';
+
+            if (!body.dataset.loaded) {
+                body.innerHTML = '<p class="incident-empty">Loading incident detail...</p>';
+                fetch(`/get-incident/${encodeURIComponent(incident.incident_id)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            body.innerHTML = buildIncidentDetailHtml(data.incident);
+                            body.dataset.loaded = 'true';
+                        } else {
+                            body.innerHTML = '<p class="incident-empty">Could not load incident detail.</p>';
+                        }
+                    })
+                    .catch(() => {
+                        body.innerHTML = '<p class="incident-empty">Could not load incident detail.</p>';
+                    });
+            }
+        });
+
+        incidentList.appendChild(item);
+    });
+}
+
+function getWorstSeverity(severityBreakdown) {
+    if (!severityBreakdown) return 'LOW';
+    const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+    for (const severity of order) {
+        if (severityBreakdown[severity] > 0) return severity;
+    }
+    return 'LOW';
+}
+
+function buildIncidentDetailHtml(incident) {
+    if (!incident.drifts || incident.drifts.length === 0) {
+        return '<p class="incident-empty">No drifts in this run - configuration matched the baseline.</p>';
+    }
+
+    let html = '<div class="incident-drift-list">';
+    incident.drifts.forEach((drift, index) => {
+        const severity = drift.severity || 'MEDIUM';
+        html += `
+            <div class="incident-drift-row">
+                <span class="severity-badge severity-${severity.toLowerCase()}">${severity}</span>
+                <div class="incident-drift-info">
+                    <p><strong>${escapeHtml(drift.change_type || '')}</strong> — ${escapeHtml(drift.resource_name || drift.bucket_name || '')}</p>
+                    ${drift.likely_cause ? `<p class="incident-drift-cause">${escapeHtml(drift.likely_cause)}</p>` : ''}
+                </div>
+            </div>`;
+    });
+    html += '</div>';
+    return html;
 }
 
 function getDriftIconClass(type) {

@@ -19,6 +19,7 @@ import time
 import json
 import hashlib
 import re
+import uuid
 from datetime import datetime
 import threading
 from flask_apscheduler import APScheduler
@@ -47,23 +48,27 @@ DEMO_USER_EMAIL = 'madhumithakk1504@gmail.com'
 AWS_REGION = 'eu-north-1'
 DYNAMODB_TABLE_NAME = 'Users'
 SNAPSHOTS_TABLE_NAME = 'Snapshots'
+INCIDENTS_TABLE_NAME = 'Incidents'
 
 # Initialize DynamoDB client
 try:
     dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
     table = dynamodb.Table(DYNAMODB_TABLE_NAME)
     snapshots_table = dynamodb.Table(SNAPSHOTS_TABLE_NAME)
+    incidents_table = dynamodb.Table(INCIDENTS_TABLE_NAME)
     logger.info(f"Connected to DynamoDB table: {DYNAMODB_TABLE_NAME}")
     logger.info(f"Connected to DynamoDB table: {SNAPSHOTS_TABLE_NAME}")
+    logger.info(f"Connected to DynamoDB table: {INCIDENTS_TABLE_NAME}")
 except Exception as e:
     logger.error(f"Failed to connect to DynamoDB: {str(e)}")
     dynamodb = None
     table = None
     snapshots_table = None
+    incidents_table = None
 
 def create_table_if_not_exists():
-    """Create the Users and Snapshots tables if they don't exist"""
-    global table, snapshots_table  # Use the global table variables
+    """Create the Users, Snapshots, and Incidents tables if they don't exist"""
+    global table, snapshots_table, incidents_table  # Use the global table variables
     
     # Create Users table
     try:
@@ -137,6 +142,47 @@ def create_table_if_not_exists():
                 raise create_error
         else:
             logger.error(f"Error checking snapshots table existence: {str(e)}")
+            raise e
+
+    # Create Incidents table
+    try:
+        incidents_table.load()
+        logger.info(f"Table {INCIDENTS_TABLE_NAME} already exists")
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ResourceNotFoundException':
+            try:
+                logger.info(f"Creating table {INCIDENTS_TABLE_NAME}...")
+                incidents_table = dynamodb.create_table(
+                    TableName=INCIDENTS_TABLE_NAME,
+                    KeySchema=[
+                        {
+                            'AttributeName': 'user_email',
+                            'KeyType': 'HASH'  # Partition key
+                        },
+                        {
+                            'AttributeName': 'incident_id',
+                            'KeyType': 'RANGE'  # Sort key
+                        }
+                    ],
+                    AttributeDefinitions=[
+                        {
+                            'AttributeName': 'user_email',
+                            'AttributeType': 'S'
+                        },
+                        {
+                            'AttributeName': 'incident_id',
+                            'AttributeType': 'S'
+                        }
+                    ],
+                    BillingMode='PAY_PER_REQUEST'
+                )
+                incidents_table.wait_until_exists()
+                logger.info(f"Successfully created table: {INCIDENTS_TABLE_NAME}")
+            except Exception as create_error:
+                logger.error(f"Failed to create incidents table: {str(create_error)}")
+                raise create_error
+        else:
+            logger.error(f"Error checking incidents table existence: {str(e)}")
             raise e
 
 def validate_user_credentials(email, password):
@@ -644,12 +690,22 @@ def run_drift_detection(user_email):
         # Compare with baseline and detect drift
         drift_summary = compare_with_baseline(baseline_snapshots, current_resources)
         
+        # Build and store a postmortem-style incident record for this run, even if
+        # no drift was found, so there's a complete audit trail to review later.
+        incident_record = build_incident_record(user_email, drift_summary)
+        save_incident(incident_record)
+        
         # Update dashboard with drift status
         update_dashboard(user_email, drift_summary, 'Running')
         
         # Send email notification if drift detected
         if drift_summary['total_drifts'] > 0:
-            send_ses_notification(SES_SENDER_EMAIL, SES_RECEIVER_EMAIL, drift_summary)
+            send_ses_notification(
+                SES_SENDER_EMAIL,
+                SES_RECEIVER_EMAIL,
+                drift_summary,
+                executive_summary=incident_record['executive_summary']
+            )
         
         logger.info(f"Drift detection completed for {user_email}: {drift_summary['total_drifts']} drifts detected")
         
@@ -849,6 +905,379 @@ def collect_azure_current(credentials):
         logger.error(f"Error collecting Azure resources: {e}")
         return {}
 
+# =============================================================================
+# DRIFT DIAGNOSTICS: FIELD-LEVEL DIFFING, SEVERITY, ROOT CAUSE
+# =============================================================================
+
+# Relative ranking used to pick the "worst" severity when a resource has
+# multiple field-level changes in a single drift event.
+SEVERITY_ORDER = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2, 'CRITICAL': 3}
+
+# Maps a canonical config field name to (severity, likely_cause, recommended_action).
+# This is the rule table an on-call engineer would use to triage a drift without
+# having to inspect the raw resource manually.
+FIELD_SEVERITY_RULES = {
+    'security_groups': (
+        'CRITICAL',
+        "The security group(s) attached to this resource changed, which can widen or "
+        "restrict network access.",
+        "Diff the security group's ingress/egress rules against the baseline and revert "
+        "any unauthorized changes immediately."
+    ),
+    'key_name': (
+        'CRITICAL',
+        "The SSH key pair associated with the instance changed, affecting who can log in to it.",
+        "Confirm the key change was authorized. If not, rotate access and investigate how it happened."
+    ),
+    'image_id': (
+        'HIGH',
+        "The base image (AMI) backing the instance changed.",
+        "Confirm the new image is from an approved, trusted source before allowing it to remain."
+    ),
+    'state': (
+        'HIGH',
+        "The resource's runtime state changed (e.g. stopped/terminated), which can indicate "
+        "an outage or an unplanned shutdown.",
+        "Confirm whether this was planned maintenance. If not, investigate who/what changed the "
+        "state and restart the resource if required."
+    ),
+    'status': (
+        'HIGH',
+        "The resource's status changed, which can indicate an outage or an unplanned change.",
+        "Confirm whether this was planned. If not, investigate the cause and restore service."
+    ),
+    'db_instance_status': (
+        'HIGH',
+        "The database instance status changed, which can indicate a database outage.",
+        "Check database availability immediately and confirm whether the change was planned."
+    ),
+    'vpc_id': (
+        'HIGH',
+        "The resource's VPC (network placement) changed.",
+        "Confirm the resource is still in the intended network segment; re-associate it if this was unintended."
+    ),
+    'subnet_id': (
+        'MEDIUM',
+        "The resource's subnet changed, which can affect network routing and reachability.",
+        "Confirm the new subnet still meets connectivity and security requirements."
+    ),
+    'instance_type': (
+        'MEDIUM',
+        "Compute sizing (instance type) changed, which affects cost and performance.",
+        "Confirm this resize was intentional; revert if it was not requested."
+    ),
+    'db_instance_class': (
+        'MEDIUM',
+        "Database instance sizing changed, which affects cost and performance.",
+        "Confirm this resize was intentional; revert if it was not requested."
+    ),
+    'machine_type': (
+        'MEDIUM',
+        "Compute sizing (machine type) changed, which affects cost and performance.",
+        "Confirm this resize was intentional; revert if it was not requested."
+    ),
+    'vm_size': (
+        'MEDIUM',
+        "VM sizing changed, which affects cost and performance.",
+        "Confirm this resize was intentional; revert if it was not requested."
+    ),
+    'engine_version': (
+        'MEDIUM',
+        "The database engine version changed.",
+        "Validate application compatibility and confirm this was a planned upgrade."
+    ),
+    'allocated_storage': (
+        'MEDIUM',
+        "Allocated storage capacity changed.",
+        "Confirm this was an intentional resize; unexpected shrinkage can risk data loss."
+    ),
+    'storage_type': (
+        'MEDIUM',
+        "The underlying storage type changed, which can affect performance and cost.",
+        "Confirm this change was intentional and still meets performance requirements."
+    ),
+    'sku': (
+        'MEDIUM',
+        "The resource's SKU/tier changed, which affects cost and available features.",
+        "Confirm this change was intentional."
+    ),
+    'region': (
+        'MEDIUM',
+        "The resource's region changed.",
+        "Confirm this reflects an intentional migration; unexpected region changes can affect "
+        "latency, cost, and data residency compliance."
+    ),
+    'location': (
+        'MEDIUM',
+        "The resource's location changed.",
+        "Confirm this reflects an intentional migration; unexpected location changes can affect "
+        "latency, cost, and data residency compliance."
+    ),
+    'availability_zone': (
+        'LOW',
+        "The resource's availability zone changed.",
+        "Usually low risk; confirm it doesn't break any zone-pinned dependencies."
+    ),
+    'storage_class': (
+        'LOW',
+        "The storage class changed, which affects cost and retrieval performance.",
+        "Confirm the new class still meets access-pattern requirements."
+    ),
+    'name': (
+        'LOW',
+        "The resource's display name changed.",
+        "Usually cosmetic; confirm it still matches your naming convention."
+    ),
+}
+
+# Default treatment for fields not explicitly covered above.
+DEFAULT_FIELD_SEVERITY = 'MEDIUM'
+DEFAULT_FIELD_CAUSE = "This field changed from its baseline value."
+DEFAULT_FIELD_ACTION = "Review whether this change was intentional and refresh the baseline if approved."
+
+# Resource types that should always be treated as high-severity when newly
+# discovered, since they typically control access or expose data.
+SENSITIVE_NEW_RESOURCE_TYPES = {'SECURITYGROUP', 'IAMROLE', 'STORAGEACCOUNT', 'S3'}
+
+
+def compute_field_diff(old_config, new_config):
+    """
+    Compute a field-level diff between two canonical config JSON strings (or dicts).
+    Returns a list of {field, old_value, new_value, change} entries, where change is
+    one of 'added', 'removed', or 'modified'. This is what lets a drift alert say
+    exactly *what* changed instead of just *that* something changed.
+    """
+    try:
+        old_dict = json.loads(old_config) if isinstance(old_config, str) else (old_config or {})
+    except (json.JSONDecodeError, TypeError):
+        old_dict = {}
+    try:
+        new_dict = json.loads(new_config) if isinstance(new_config, str) else (new_config or {})
+    except (json.JSONDecodeError, TypeError):
+        new_dict = {}
+
+    if not isinstance(old_dict, dict):
+        old_dict = {}
+    if not isinstance(new_dict, dict):
+        new_dict = {}
+
+    diffs = []
+    for field in sorted(set(old_dict.keys()) | set(new_dict.keys())):
+        old_value = old_dict.get(field)
+        new_value = new_dict.get(field)
+
+        if old_value == new_value:
+            continue
+
+        if field not in old_dict:
+            change = 'added'
+        elif field not in new_dict:
+            change = 'removed'
+        else:
+            change = 'modified'
+
+        diffs.append({
+            'field': field,
+            'old_value': old_value,
+            'new_value': new_value,
+            'change': change
+        })
+
+    return diffs
+
+
+def classify_drift_severity(drift):
+    """
+    Classify a drift dict into 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' severity.
+    For field_change drifts, severity is the worst severity among the individual
+    field-level changes. Other drift types use fixed risk-based defaults.
+    """
+    drift_type = drift.get('type')
+
+    if drift_type == 'field_change':
+        field_diff = drift.get('field_diff') or []
+        if not field_diff:
+            return DEFAULT_FIELD_SEVERITY
+
+        worst = 'LOW'
+        for entry in field_diff:
+            rule = FIELD_SEVERITY_RULES.get(entry.get('field'))
+            severity = rule[0] if rule else DEFAULT_FIELD_SEVERITY
+            if SEVERITY_ORDER[severity] > SEVERITY_ORDER[worst]:
+                worst = severity
+        return worst
+
+    if drift_type == 'new_resource':
+        resource_type = (drift.get('resource_type') or '').upper()
+        return 'HIGH' if resource_type in SENSITIVE_NEW_RESOURCE_TYPES else 'MEDIUM'
+
+    if drift_type == 'deleted_resource':
+        # A resource disappearing from a cloud is always worth immediate attention -
+        # it may be an outage or an unauthorized deletion.
+        return 'HIGH'
+
+    if drift_type == 's3_parity':
+        # Same bucket name, different configuration across clouds is a governance
+        # and potential data-exposure risk.
+        return 'HIGH'
+
+    return DEFAULT_FIELD_SEVERITY
+
+
+def suggest_root_cause_and_fix(drift):
+    """
+    Return a (likely_cause, recommended_action) tuple in plain English for a drift,
+    written the way a support engineer would document it in an incident/postmortem.
+    """
+    drift_type = drift.get('type')
+
+    if drift_type == 'field_change':
+        field_diff = drift.get('field_diff') or []
+        if not field_diff:
+            return (
+                "The configuration hash changed but the specific fields could not be "
+                "determined from the stored snapshot.",
+                "Re-run baseline collection and compare the resource manually."
+            )
+
+        # Explain using the single field with the highest severity, since that's
+        # the one that actually drives the overall severity rating.
+        worst_entry = None
+        worst_severity = 'LOW'
+        for entry in field_diff:
+            rule = FIELD_SEVERITY_RULES.get(entry.get('field'))
+            severity = rule[0] if rule else DEFAULT_FIELD_SEVERITY
+            if worst_entry is None or SEVERITY_ORDER[severity] >= SEVERITY_ORDER[worst_severity]:
+                worst_severity = severity
+                worst_entry = entry
+
+        rule = FIELD_SEVERITY_RULES.get(worst_entry.get('field'))
+        if rule:
+            cause, action = rule[1], rule[2]
+        else:
+            cause = (
+                f"The '{worst_entry.get('field')}' field changed from "
+                f"'{worst_entry.get('old_value')}' to '{worst_entry.get('new_value')}'."
+            )
+            action = DEFAULT_FIELD_ACTION
+
+        if len(field_diff) > 1:
+            cause += f" ({len(field_diff)} fields changed in total.)"
+
+        return cause, action
+
+    if drift_type == 'new_resource':
+        return (
+            "A new, previously unseen resource was detected that is not part of the baseline.",
+            "Confirm this resource was provisioned intentionally (e.g. via IaC or an approved "
+            "console action), then re-run baseline collection to include it if approved."
+        )
+
+    if drift_type == 'deleted_resource':
+        return (
+            "A previously baselined resource is no longer present, which may indicate an "
+            "outage or an unauthorized deletion.",
+            "Confirm whether the deletion was intentional. If not, restore the resource from "
+            "backups/IaC and audit who removed it."
+        )
+
+    if drift_type == 's3_parity':
+        return (
+            "Two clouds have a storage bucket with the same name but different "
+            "configurations, risking accidental data exposure or a governance gap.",
+            "Reconcile the conflicting configurations or rename one bucket so naming and "
+            "policy stay consistent across clouds."
+        )
+
+    return ("Unclassified change detected.", "Review this drift manually.")
+
+
+def enrich_drift_with_diagnostics(drift):
+    """Attach severity, likely_cause, and recommended_action to a drift dict in place."""
+    drift['severity'] = classify_drift_severity(drift)
+    likely_cause, recommended_action = suggest_root_cause_and_fix(drift)
+    drift['likely_cause'] = likely_cause
+    drift['recommended_action'] = recommended_action
+    return drift
+
+
+def build_incident_record(user_email, drift_summary):
+    """
+    Build a postmortem-style incident record from a drift_summary produced by
+    compare_with_baseline(). This is the audit trail an SRE would file after
+    triaging a drift check, and is stored on every run - even clean ones - so
+    there's a complete history to review.
+    """
+    severity_breakdown = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+    all_drifts = list(drift_summary.get('drifts_detected', [])) + list(drift_summary.get('s3_parity_drifts', []))
+
+    for drift in all_drifts:
+        severity = drift.get('severity', DEFAULT_FIELD_SEVERITY)
+        severity_breakdown[severity] = severity_breakdown.get(severity, 0) + 1
+
+    total_drifts = drift_summary.get('total_drifts', 0) + drift_summary.get('total_s3_parity_drifts', 0)
+    clouds_checked = drift_summary.get('clouds_checked', [])
+    clouds_label = ', '.join(clouds_checked) if clouds_checked else 'configured clouds'
+
+    if total_drifts == 0:
+        executive_summary = f"No drift detected across {clouds_label}."
+    else:
+        breakdown_parts = [f"{count} {severity}" for severity, count in severity_breakdown.items() if count > 0]
+        executive_summary = (
+            f"{total_drifts} drift(s) detected across {clouds_label}: {', '.join(breakdown_parts)}."
+        )
+
+    incident_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+    return {
+        'user_email': user_email,
+        'incident_id': incident_id,
+        'timestamp': drift_summary.get('timestamp', datetime.now().isoformat()),
+        'total_drifts': total_drifts,
+        'severity_breakdown': severity_breakdown,
+        'clouds_checked': clouds_checked,
+        'executive_summary': executive_summary,
+        'drifts': all_drifts,
+        'created_at': int(time.time())
+    }
+
+
+def save_incident(incident_record):
+    """Persist an incident/postmortem record to the Incidents table."""
+    try:
+        incidents_table.put_item(Item=incident_record)
+        logger.info(f"Saved incident {incident_record['incident_id']} for {incident_record['user_email']}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving incident record: {str(e)}")
+        return False
+
+
+def get_incident_history(user_email, limit=20):
+    """Return the most recent incident/postmortem records for a user."""
+    try:
+        response = incidents_table.query(
+            KeyConditionExpression='user_email = :ue',
+            ExpressionAttributeValues={':ue': user_email},
+            ScanIndexForward=False,  # incident_id starts with an epoch timestamp, so this gives newest-first
+            Limit=limit
+        )
+        return response.get('Items', [])
+    except Exception as e:
+        logger.error(f"Error getting incident history: {str(e)}")
+        return []
+
+
+def get_incident_detail(user_email, incident_id):
+    """Fetch a single incident/postmortem record by ID."""
+    try:
+        response = incidents_table.get_item(Key={'user_email': user_email, 'incident_id': incident_id})
+        return response.get('Item')
+    except Exception as e:
+        logger.error(f"Error getting incident detail: {str(e)}")
+        return None
+
+
 def compare_with_baseline(baseline_snapshots, current_resources):
     """Compare current resources with baseline and detect drift"""
     drift_summary = {
@@ -876,8 +1305,13 @@ def compare_with_baseline(baseline_snapshots, current_resources):
                             'resource_id': current_resource['resource_id'],
                             'resource_name': current_resource['resource_name'],
                             'change_type': 'Configuration modified',
-                            'timestamp': drift_summary['timestamp']
+                            'timestamp': drift_summary['timestamp'],
+                            'field_diff': compute_field_diff(
+                                baseline_resource.get('config', '{}'),
+                                current_resource.get('config', '{}')
+                            )
                         }
+                        enrich_drift_with_diagnostics(drift)
                         drift_summary['drifts_detected'].append(drift)
                         drift_summary['total_drifts'] += 1
                 else:
@@ -891,6 +1325,7 @@ def compare_with_baseline(baseline_snapshots, current_resources):
                         'change_type': 'New resource created',
                         'timestamp': drift_summary['timestamp']
                     }
+                    enrich_drift_with_diagnostics(drift)
                     drift_summary['drifts_detected'].append(drift)
                     drift_summary['total_drifts'] += 1
         
@@ -909,6 +1344,7 @@ def compare_with_baseline(baseline_snapshots, current_resources):
                         'change_type': 'Resource deleted',
                         'timestamp': drift_summary['timestamp']
                     }
+                    enrich_drift_with_diagnostics(drift)
                     drift_summary['drifts_detected'].append(drift)
                     drift_summary['total_drifts'] += 1
         
@@ -954,6 +1390,7 @@ def check_s3_cross_cloud_parity(baseline_snapshots, current_resources):
                         'change_type': 'S3 cross-cloud parity violation',
                         'timestamp': datetime.now().isoformat()
                     }
+                    enrich_drift_with_diagnostics(drift)
                     s3_parity_drifts.append(drift)
         
         return {
@@ -965,7 +1402,7 @@ def check_s3_cross_cloud_parity(baseline_snapshots, current_resources):
         logger.error(f"Error checking S3 cross-cloud parity: {str(e)}")
         return {'s3_parity_drifts': [], 'total_s3_parity_drifts': 0}
 
-def send_ses_notification(sender, receiver, drift_summary):
+def send_ses_notification(sender, receiver, drift_summary, executive_summary=None):
     """Send SES email notification for drift detection"""
     try:
         # Initialize SES client
@@ -974,10 +1411,12 @@ def send_ses_notification(sender, receiver, drift_summary):
         # Prepare email content
         subject = f"ConfigSync Drift Alert - {drift_summary['total_drifts']} Changes Detected"
         
-        body = f"""
-ConfigSync Dashboard - Drift Detection Alert
+        body = "\nConfigSync Dashboard - Drift Detection Alert\n\n"
 
-Timestamp: {drift_summary['timestamp']}
+        if executive_summary:
+            body += f"Summary: {executive_summary}\n\n"
+
+        body += f"""Timestamp: {drift_summary['timestamp']}
 Total Drifts Detected: {drift_summary['total_drifts']}
 Clouds Checked: {', '.join(drift_summary['clouds_checked'])}
 
@@ -986,12 +1425,17 @@ DETAILED CHANGES:
         
         for i, drift in enumerate(drift_summary['drifts_detected'], 1):
             body += f"""
-{i}. {drift['change_type']}
+{i}. [{drift.get('severity', 'MEDIUM')}] {drift['change_type']}
    Cloud: {drift['cloud']}
    Resource Type: {drift['resource_type']}
    Resource ID: {drift['resource_id']}
    Resource Name: {drift['resource_name']}
    Timestamp: {drift['timestamp']}"""
+
+            if drift.get('likely_cause'):
+                body += f"""
+   Likely Cause: {drift['likely_cause']}
+   Recommended Action: {drift.get('recommended_action', 'Review manually.')}"""
             
             # Add specific details for S3 versioning
             if drift.get('type') == 's3_versioning' and 'details' in drift:
@@ -1005,15 +1449,20 @@ DETAILED CHANGES:
             body += f"\nS3 CROSS-CLOUD PARITY VIOLATIONS:\n"
             for i, drift in enumerate(drift_summary['s3_parity_drifts'], 1):
                 body += f"""
-{i}. {drift['change_type']}
+{i}. [{drift.get('severity', 'HIGH')}] {drift['change_type']}
    Bucket Name: {drift['bucket_name']}
    Clouds Affected: {', '.join(drift['clouds_affected'])}
-   Timestamp: {drift['timestamp']}
-"""
+   Timestamp: {drift['timestamp']}"""
+                if drift.get('likely_cause'):
+                    body += f"""
+   Likely Cause: {drift['likely_cause']}
+   Recommended Action: {drift.get('recommended_action', 'Review manually.')}"""
+                body += "\n"
         
         body += f"""
 
-Please review these changes in your ConfigSync Dashboard.
+Please review these changes, including the full field-level diffs and incident
+history, in your ConfigSync Dashboard.
 
 Best regards,
 ConfigSync Monitoring System
@@ -1395,6 +1844,49 @@ def run_drift_check_api():
     except Exception as e:
         logger.error(f"Error running drift check: {str(e)}")
         return {'success': False, 'message': f'Error running drift check: {str(e)}'}, 500
+
+@app.route('/get-incident-history')
+def get_incident_history_api():
+    """Get the most recent drift-check incident/postmortem records for the current user"""
+    if 'user_email' not in session:
+        return {'success': False, 'message': 'Please log in'}, 401
+
+    try:
+        user_email = session['user_email']
+        incidents = get_incident_history(user_email, limit=20)
+
+        return {
+            'success': True,
+            'incidents': incidents
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting incident history: {str(e)}")
+        return {'success': False, 'message': f'Error getting incident history: {str(e)}'}, 500
+
+
+@app.route('/get-incident/<incident_id>')
+def get_incident_detail_api(incident_id):
+    """Get the full detail of a single incident/postmortem record"""
+    if 'user_email' not in session:
+        return {'success': False, 'message': 'Please log in'}, 401
+
+    try:
+        user_email = session['user_email']
+        incident = get_incident_detail(user_email, incident_id)
+
+        if incident is None:
+            return {'success': False, 'message': 'Incident not found'}, 404
+
+        return {
+            'success': True,
+            'incident': incident
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting incident detail: {str(e)}")
+        return {'success': False, 'message': f'Error getting incident detail: {str(e)}'}, 500
+
 
 @app.route('/test-s3-versioning-email', methods=['POST'])
 def test_s3_versioning_email():

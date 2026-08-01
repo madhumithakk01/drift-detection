@@ -1384,6 +1384,9 @@ body {
     font-weight: 600;
     color: var(--text-primary);
     margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .drift-content-info p {
@@ -1396,6 +1399,214 @@ body {
     font-size: 0.8rem;
     color: var(--text-secondary);
     font-style: italic;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* =============================================================================
+   DRIFT DIAGNOSTICS: SEVERITY BADGES, EXPANDABLE DIFFS, INCIDENT HISTORY
+   ============================================================================= */
+
+.severity-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    line-height: 1.6;
+}
+
+.severity-badge.severity-critical {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.severity-badge.severity-high {
+    background: rgba(249, 115, 22, 0.2);
+    color: #f97316;
+    border: 1px solid rgba(249, 115, 22, 0.4);
+}
+
+.severity-badge.severity-medium {
+    background: rgba(251, 191, 36, 0.2);
+    color: #f59e0b;
+    border: 1px solid rgba(251, 191, 36, 0.4);
+}
+
+.severity-badge.severity-low {
+    background: rgba(0, 212, 255, 0.15);
+    color: var(--accent-color);
+    border: 1px solid rgba(0, 212, 255, 0.35);
+}
+
+.severity-badge.severity-clean {
+    background: rgba(16, 185, 129, 0.2);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.drift-item-expandable {
+    flex-direction: column;
+    align-items: stretch;
+    cursor: pointer;
+}
+
+.drift-item-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+}
+
+.drift-expand-icon {
+    font-size: 0.75rem;
+    transition: transform 0.2s ease;
+}
+
+.drift-item-header.expanded .drift-expand-icon {
+    transform: rotate(180deg);
+}
+
+.drift-item-body {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.diagnostic-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.drift-diagnostic-row {
+    margin-bottom: 10px;
+}
+
+.drift-diagnostic-row p {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+
+.field-diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    margin-top: 6px;
+}
+
+.field-diff-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: top;
+}
+
+.field-diff-table .field-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+}
+
+.field-diff-table .field-old {
+    color: #ef4444;
+}
+
+.field-diff-table .field-new {
+    color: #10b981;
+}
+
+.field-diff-table .field-arrow {
+    color: var(--text-secondary);
+    text-align: center;
+    width: 24px;
+}
+
+.incident-subtitle {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin-bottom: 14px;
+}
+
+.incident-empty {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-style: italic;
+    margin: 0;
+}
+
+.incident-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.incident-item {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.incident-item-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+}
+
+.incident-summary-text {
+    flex: 1;
+}
+
+.incident-executive-summary {
+    font-size: 0.88rem;
+    color: var(--text-primary);
+    margin: 0 0 4px 0;
+}
+
+.incident-timestamp {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.incident-item-body {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.incident-drift-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.incident-drift-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.incident-drift-info p {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+
+.incident-drift-cause {
+    color: var(--text-secondary) !important;
+    font-size: 0.8rem !important;
+    margin-top: 2px !important;
 }
 
 /* Responsive Design */
